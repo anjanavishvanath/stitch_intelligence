@@ -1,0 +1,82 @@
+services:
+    backend:
+        build: ./backend
+        container_name: backend_stitch
+        restart: unless-stopped
+        env_file:
+            - ./backend/.env
+        environment:
+            - PYTHONUNBUFFERED=1
+        ports:
+            - "5000:5000"
+        networks:
+            - mqtt_network
+
+    frontend:
+        build: ./frontend
+        container_name: frontend_stitch
+        restart: unless-stopped
+        ports:
+            - "3000:80"
+        networks:
+            - mqtt_network
+
+    database:
+        image: timescale/timescaledb:latest-pg14
+        container_name: db_stitch
+        environment:
+            - POSTGRES_USER=stitch_user
+            - POSTGRES_PASSWORD=stitch_pass
+            - POSTGRES_DB=stitch_db
+        ports:
+            - "5432:5432"
+        networks:
+            - mqtt_network
+        volumes:
+            - ./sql:/docker-entrypoint-initdb.d:ro # binds the local /sql directory to the container's init directory. :ro avoids accidental container writes.
+            - ./pgdata:/var/lib/postgresql/data # This is for persistent data storage
+        restart: unless-stopped
+        healthcheck:
+            test: [ "CMD-SHELL", "pg_isready -U stitch_user -d stitch_db" ]
+            interval: 5s
+            timeout: 5s
+            retries: 5
+
+    mqtt_broker:
+        image: eclipse-mosquitto:latest
+        container_name: mqtt_broker
+        ports:
+            - "1883:1883"
+            - "9001:9001"
+        networks:
+            - mqtt_network
+        volumes:
+            - ./mosquitto/config:/mosquitto/config
+            - ./mosquitto/data:/mosquitto/data
+            - ./mosquitto/log:/mosquitto/log
+        restart: unless-stopped
+        healthcheck:
+            test: [ "CMD-SHELL", "mosquitto_sub -h localhost -t test -C 1 -w 1 || exit 0" ]
+            interval: 5s
+            timeout: 5s
+            retries: 5
+
+    mqtt_ingestor:
+        build: ./backend
+        container_name: mqtt_ingestor
+        command: python mqtt_ingestor.py
+        env_file:
+            - ./backend/.env
+        environment:
+            - PYTHONUNBUFFERED=1
+            - MQTT_BROKER=mqtt_broker
+            - DATABASE_URL=postgresql://stitch_user:stitch_pass@db_stitch:5432/stitch_db
+        networks:
+            - mqtt_network
+        depends_on:
+            - mqtt_broker
+            - database
+
+networks:
+    mqtt_network:
+        driver: bridge
