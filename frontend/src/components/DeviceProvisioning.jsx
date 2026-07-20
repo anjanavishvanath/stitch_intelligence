@@ -1,43 +1,46 @@
 import { useState } from "react";
-import api from "../api"
-import { useAuth } from "../utilities/AuthProvider";
-import { Link } from "react-router-dom";
+import api from "../api";
 
 export default function DeviceProvisioning() {
-    const user = useAuth(); //to ensure the user is logged in
-    const [macAddress, setMacAddress] = useState('');
+    const [macAddress, setMacAddress] = useState("");
     const [slpt, setSlpt] = useState("");
     const [message, setMessage] = useState("");
+    const [isError, setIsError] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
 
     const handleProvisionRequest = async (e) => {
         e.preventDefault();
         setMessage("");
-        setSlpt(null);
+        setIsError(false);
+        setSlpt("");
+
+        if (!/^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(macAddress)) {
+            setMessage("Please enter a valid MAC address (e.g., AA:BB:CC:DD:EE:FF).");
+            setIsError(true);
+            return;
+        }
+
         setIsLoading(true);
         try {
-            if (!/^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(macAddress)) {
-                setMessage("Please enter a valid MAC address (e.g., AA:BB:CC:DD:EE:FF).");
-                setIsLoading(false);
-                return;
-            }
             const response = await api.post("/devices/provision", {
-                enrollment_id: macAddress.toUpperCase()
+                enrollment_id: macAddress.toUpperCase(),
             });
             setSlpt(response.data.slpt);
-            setMessage("Provisioning Token generated successfully. See instructions below.");
+            setMessage("Provisioning token generated. Follow the steps below to activate the device.");
+            setIsError(false);
         } catch (e) {
-            console.log("Provisioning error: ", e);
-            const errMsg = e.response?.data?.msg || "An unexpected error occured";
+            const errMsg = e.response?.data?.msg || "An unexpected error occurred";
             setMessage(`Error: ${errMsg}`);
+            setIsError(true);
         } finally {
             setIsLoading(false);
         }
     };
+
     return (
         <div className="provisioning-container">
             <form onSubmit={handleProvisionRequest}>
-                <div className="form-group">
+                <div className="form-group" style={{ maxWidth: '480px' }}>
                     <label htmlFor="macInput">Device Enrollment ID (MAC Address)</label>
                     <input
                         id="macInput"
@@ -49,24 +52,33 @@ export default function DeviceProvisioning() {
                     />
                 </div>
 
-                <button type="submit" className="btn btn-primary" disabled={isLoading} style={{ marginTop: '1rem' }}>
-                    {isLoading ? 'Generating...' : 'Generate Provision Token'}
+                <button
+                    type="submit"
+                    className="btn btn-primary"
+                    disabled={isLoading}
+                >
+                    {isLoading ? "Generating…" : "Generate Provision Token"}
                 </button>
             </form>
 
-            {message && <p className={slpt ? "success-msg" : "error-msg"}>{message}</p>}
+            {message && (
+                <p className={isError ? "error-msg" : "success-msg"}>
+                    {message}
+                </p>
+            )}
+
             {slpt && (
                 <div className="provisioning-instructions">
-                    <h3>Instructions for Device Activation:</h3>
-                    <p>1. Connect to the device's Wi-Fi access point (e.g., "preSense_provision").</p>
-                    <p>2. Go to <code>http://192.168.4.1/</code> in your browser.</p>
-                    <p>3. Enter your Home Wi-Fi credentials.</p>
-                    <p>4. **Enter the Enrollment ID (MAC) again.**</p>
-                    <p>5. **Copy and paste the following token into the form:**</p>
+                    <h3>Activation steps</h3>
+                    <p>1. Connect to the device's Wi-Fi access point (e.g. <code className="text-mono">preSense_provision</code>).</p>
+                    <p>2. Open <code className="text-mono">http://192.168.4.1/</code> in your browser.</p>
+                    <p>3. Enter your factory Wi-Fi credentials.</p>
+                    <p>4. Re-enter the same MAC address as the enrollment ID.</p>
+                    <p>5. Paste the token below into the activation form:</p>
                     <code className="slpt-code">{slpt}</code>
-                    <p>6. Submit the form to complete device activation.</p>
+                    <p className="text-sm text-faint">This token is single-use and expires in 10 minutes.</p>
                 </div>
             )}
         </div>
     );
-};
+}

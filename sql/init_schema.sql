@@ -1,4 +1,6 @@
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+-- NOTE: TimescaleDB extension removed for Neon compatibility.
+-- When telemetry ingestion needs hypertables, migrate to Timescale Cloud
+-- or self-hosted TimescaleDB and re-add: CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
@@ -53,3 +55,27 @@ CREATE TABLE IF NOT EXISTS devices (
     asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- pieces: one row per completed (or abandoned) sewing cycle.
+-- `segments` is JSONB so schema tweaks don't require a migration.
+CREATE TABLE IF NOT EXISTS pieces (
+    id                    BIGSERIAL PRIMARY KEY,
+    device_mac            TEXT      NOT NULL,
+    piece_seq             INTEGER,
+    piece_started_at_ms   BIGINT,
+    piece_completed_at_ms BIGINT,
+    idle_before_ms        INTEGER,
+    total_cycle_time_ms   INTEGER,
+    total_stitching_ms    INTEGER,
+    total_adjustment_ms   INTEGER,
+    total_stitches        INTEGER,
+    avg_stitch_hz         REAL,
+    adjustment_count      INTEGER,
+    trim_and_wipe_time_ms INTEGER,
+    status                TEXT,
+    segments              JSONB,
+    received_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pieces_device_recv ON pieces (device_mac, received_at DESC);
+
+

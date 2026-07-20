@@ -4,7 +4,16 @@ import os
 from flask import request, jsonify
 from flask_jwt_extended import get_jwt_identity
 from datetime import datetime, timezone, timedelta
-from .db_helpers import insert_provisioning_token, get_provisioning_token, activate_device_in_db, get_devices_by_user_id
+from .db_helpers import (
+    insert_provisioning_token,
+    get_provisioning_token,
+    activate_device_in_db,
+    get_devices_with_pieces_for_org,
+    get_device_in_org,
+    get_pieces_for_device,
+    get_org_summary,
+)
+from .broker_admin import register_device_client, BrokerAdminError
 
 SLPT_EXPIRY_MINUTES = int(os.getenv("SLPT_EXPIRY_MINUTES", 10))
 BROKER_URL = os.getenv("MQTT_BROKER_URL", "192.168.1.2")
@@ -76,6 +85,21 @@ def activate_device():
         # Success. Generate a random mqtt password
         mqtt_password = secrets.token_hex(16)
         activate_device_in_db(mac, token_record["user_id"], mqtt_password, data.get("os_version", "unknown"))
+
+        # Register the device's credentials at the broker so they take effect immediately.
+        # Idempotent: if a row from a previous activation existed, the broker side updates the password too.
+        try:
+            register_device_client(mac, mqtt_password)
+        except BrokerAdminError as e:
+            # DB row is already committed; report the broker-side failure and let the client retry
+            # with a fresh provisioning token. The DB and broker are both ON CONFLICT-tolerant, so a
+            # retry overwrites cleanly without leaving zombie state.
+            print(f"Broker registration failed for {mac}: {e}", flush=True)
+            return jsonify({
+                "msg": "Device record created but broker registration failed; please re-provision and retry.",
+                "error": str(e)
+            }), 500
+
         return jsonify({
             "msg": "Device activated",
             "device_id": mac,        # fornow setting mac, later can have separate device ids
@@ -88,11 +112,47 @@ def activate_device():
         return jsonify({"msg": "Internal server error during device activation"}), 500
 
 def get_user_devices():
-    user_identity = get_jwt_identity()
-    user_id = int(user_identity)
+    """Return every device in the requester's organization, with rollups + latest piece."""
+    user_id = int(get_jwt_identity())
     try:
-        devices = get_devices_by_user_id(user_id)
+        devices = get_devices_with_pieces_for_org(user_id)
         return jsonify({"devices": devices}), 200
     except Exception as e:
         print(f"Error fetching devices for user {user_id}: {e}")
+        return jsonify({"msg": "Internal server error"}), 500
+
+
+def get_device_pieces(device_id: int):
+    """Return recent pieces for one device, scoped to the requester's org."""
+    user_id = int(get_jwt_identity())
+    try:
+        limit = int(request.args.get("limit", 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 200))  # clamp
+
+    device = get_device_in_org(device_id, user_id)
+    if device is None:
+        return jsonify({"msg": "Device not found"}), 404
+
+    try:
+        rows = get_pieces_for_device(device["device_mac"], limit=limit)
+        return jsonify({
+            "device_id":   device["id"],
+            "device_mac":  device["device_mac"],
+            "device_name": device["device_name"],
+            "pieces":      rows,
+        }), 200
+    except Exception as e:
+        print(f"Error fetching pieces for device {device_id}: {e}")
+        return jsonify({"msg": "Internal server error"}), 500
+
+
+def get_summary():
+    """Org-wide summary for the dashboard header strip."""
+    user_id = int(get_jwt_identity())
+    try:
+        return jsonify(get_org_summary(user_id)), 200
+    except Exception as e:
+        print(f"Error building summary for user {user_id}: {e}")
         return jsonify({"msg": "Internal server error"}), 500

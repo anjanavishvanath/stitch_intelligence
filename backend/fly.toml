@@ -1,0 +1,43 @@
+# Fly.io config for Stitch Intelligence backend.
+# Hosts two process groups: the Flask API and the MQTT ingestor.
+# Run `fly deploy` from this directory.
+
+app = "stitch-backend"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED        = "1"
+  JWT_ACCESS_EXPIRES_SEC  = "900"
+  JWT_REFRESH_EXPIRES_SEC = "604800"
+  SLPT_EXPIRY_MINUTES     = "10"
+  # Ingestor reaches the broker over Fly's private 6PN network.
+  MQTT_BROKER             = "stitch-mqtt.internal"
+  MQTT_PORT               = "1883"
+  MQTT_TOPIC              = "#"
+  # MQTT_USER / MQTT_PASSWORD set as secrets (see step 4d).
+  # MQTT_BROKER_URL is the PUBLIC v4 the device-activation endpoint hands back to ESP32s.
+  # Set via `fly secrets set MQTT_BROKER_URL=<public-v4>` in step 4d.
+
+# Two long-lived processes; Fly will create one machine per group on first deploy.
+[processes]
+  app      = "gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 60 --access-logfile - --error-logfile - main:app"
+  ingestor = "python mqtt_ingestor.py"
+
+# HTTP traffic only goes to the `app` group. The ingestor doesn't expose any ports.
+[http_service]
+  internal_port        = 5000
+  force_https          = true
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
+  min_machines_running = 0
+  processes            = ["app"]
+
+# VM size applies to both process groups (omit `processes` to default to all).
+[[vm]]
+  size     = "shared-cpu-1x"
+  memory   = "512mb"
+  cpu_kind = "shared"
+  cpus     = 1

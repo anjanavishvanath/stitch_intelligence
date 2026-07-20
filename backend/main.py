@@ -4,7 +4,7 @@ from flask import Flask
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required
 from utilities.auth_helpers import signup, login, refresh, logout
-from utilities.device_helpers import provision_device, activate_device, get_user_devices
+from utilities.device_helpers import provision_device, activate_device, get_user_devices, get_device_pieces, get_summary
 
 load_dotenv()
 
@@ -12,7 +12,8 @@ app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 app.config["JWT_ALGORITHM"] = "HS256"
 jwt = JWTManager(app)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+_allowed_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+CORS(app, resources={r"/api/*": {"origins": _allowed_origins}}, supports_credentials=False)
 
 # --- AUTHENTICATION ROUTE ---
 @app.route('/api/auth/signup', methods=['POST'])
@@ -47,6 +48,16 @@ def activate_device_route():
 @jwt_required()
 def get_user_devices_route():
     return get_user_devices()
+
+@app.route('/api/devices/<int:device_id>/pieces', methods=['GET'])
+@jwt_required()
+def get_device_pieces_route(device_id):
+    return get_device_pieces(device_id)
+
+@app.route('/api/summary', methods=['GET'])
+@jwt_required()
+def get_summary_route():
+    return get_summary()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)

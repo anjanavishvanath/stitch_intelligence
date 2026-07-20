@@ -3,6 +3,11 @@ FROM node:22-alpine as build
 
 WORKDIR /app
 
+# Vite reads env vars at build time and bakes them into the bundle.
+# Pass the backend URL via `--build-arg VITE_API_BASE_URL=...` during `fly deploy`.
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 # Copy package files
 COPY package*.json ./
 

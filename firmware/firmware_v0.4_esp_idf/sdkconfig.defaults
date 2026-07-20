@@ -1,0 +1,15 @@
+# Project-level defaults. Anything here overrides the IDF defaults but is
+# still overridable per-checkout via `idf.py menuconfig`.
+
+# The main task (where app_main runs) needs enough stack for the TLS handshake
+# during the HTTPS POST to /api/devices/activate. Default 3584 → stack overflow
+# during mbedTLS handshake. 10 KB is comfortable headroom.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+# mbedTLS internal stack for handshake work. Default is fine on IDF v5+, but
+# some older configs default lower — set explicitly for stability.
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+
+# Certificate bundle (required by esp_crt_bundle_attach in activation code)
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

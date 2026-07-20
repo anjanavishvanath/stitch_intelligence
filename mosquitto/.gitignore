@@ -1,0 +1,6 @@
+# Hashed but still secret — never commit.
+passwd
+
+# Local runtime artifacts (only used by docker-compose dev stack).
+data/
+log/

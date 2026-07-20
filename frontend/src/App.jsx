@@ -12,17 +12,28 @@ export default function App() {
   }
 
   return (
-    <div>
-      {user ? <nav>
-        <Link to='/dashboard'>Stitch Intelligence</Link>
-        <div>
-          <Link to='/logout' onClick={onLogout}>Logout</Link>          
-        </div>
-        <div>
-          <span>{user.username} | {user.organization}</span>
-        </div>
-      </nav>: null}
-      <main><Outlet /></main>
+    <div className="app-shell">
+      {user && (
+        <nav className="app-nav">
+          <Link to="/dashboard" className="app-nav__brand">Stitch Intelligence</Link>
+
+          <div className="app-nav__menu">
+            <span className="app-nav__user">
+              <span className="status-dot status-dot--online" aria-hidden="true"></span>
+              <strong>{user.username}</strong>
+              <span className="text-faint">·</span>
+              <span>{user.organization}</span>
+            </span>
+            <button onClick={onLogout} className="btn btn-ghost btn-sm">
+              Logout
+            </button>
+          </div>
+        </nav>
+      )}
+
+      <main className="app-main">
+        <Outlet />
+      </main>
     </div>
-  )
+  );
 }
