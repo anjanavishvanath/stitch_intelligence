@@ -16,3 +16,6 @@ dependencies:
   #   public: true
   espressif/cjson: '*'
   espressif/mqtt: '*'
+  # 3.x line fixes the missing esp_heap_caps include in the 2.5.x SPI backend.
+  espressif/led_strip: '^3.0.0'
+  lvgl/lvgl: '~9.0.0'

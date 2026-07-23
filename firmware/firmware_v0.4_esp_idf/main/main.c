@@ -43,6 +43,14 @@
 #include "esp_crt_bundle.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
+#include "driver/i2c_master.h"
+
+#include "hardware_config.h"   /* PCB pinout — single source of truth */
+#include "state.h"             /* shared runtime snapshot */
+#include "expander.h"          /* TCA9534 (buttons + LEDs) */
+#include "nfc.h"               /* PN532 reader */
+#include "indicator.h"         /* NeoPixel status LED */
+#include "lcd_ui.h"            /* LCD + LVGL + touch */
 
 
 /* ============================================================
@@ -52,13 +60,13 @@
 
 
 /* ============================================================
- * 1. Pin assignments — UPDATE TO MATCH YOUR PCB
+ * 1. Pin roles — map firmware roles to hardware nets.
+ *    Actual pin numbers live in hardware_config.h.
  * ============================================================ */
-#define PIN_ENC_A   GPIO_NUM_4
-#define PIN_ENC_B   GPIO_NUM_5
-#define PIN_FOOT    GPIO_NUM_6
-#define PIN_TRIM    GPIO_NUM_7
-#define PIN_WIPER   GPIO_NUM_8
+#define PIN_STITCH_PULSE  PULSE_OUT_GPIO       /* GPIO14 — every falling edge = 1 stitch */
+#define PIN_FOOT          FOOT_SIGNAL_GPIO     /* GPIO15 — foot lifter (informational) */
+#define PIN_TRIM          TRIMMER_SIGNAL_GPIO  /* GPIO16 — trim → piece finalising */
+#define PIN_WIPER         WIPER_SIGNAL_GPIO    /* GPIO17 — wipe → piece complete */
 
 
 /* ============================================================
@@ -74,8 +82,10 @@
 /* ============================================================
  * 3. WiFi credentials
  * ============================================================ */
-#define WIFI_SSID       "SLT_FIBRE"
-#define WIFI_PASS       "Anji@123"
+// #define WIFI_SSID       "SLT_FIBRE"
+// #define WIFI_PASS       "Anji@123"
+#define WIFI_SSID       "PEGASUS-2.4G.."
+#define WIFI_PASS       "SLT718712"
 #define WIFI_MAX_RETRY  5
 
 
@@ -87,7 +97,7 @@
 
 /* Paste the 12-char SLPT from the dashboard's "Provision New Device" flow.
  * Single-use, expires in 10 minutes. Get a fresh one if activation returns 403. */
-#define SLPT             "fee37f70bc48"
+#define SLPT             "23c53897d6f7"
 
 
 /* ============================================================
@@ -136,6 +146,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ESP_LOGI(TAG_WIFI, "connecting to AP...");
 
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        state_set_wifi(false);
         if (s_wifi_retry_num < WIFI_MAX_RETRY) {
             esp_wifi_connect();
             s_wifi_retry_num++;
@@ -149,6 +160,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) data;
         ESP_LOGI(TAG_WIFI, "got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_wifi_retry_num = 0;
+        state_set_wifi(true);
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -359,10 +371,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
     switch ((esp_mqtt_event_id_t) event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG_MQTT, "connected as %s", mac_str);
+        state_set_mqtt(true);
         xEventGroupSetBits(mqtt_event_group, MQTT_CONNECTED_BIT);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG_MQTT, "disconnected");
+        state_set_mqtt(false);
         xEventGroupClearBits(mqtt_event_group, MQTT_CONNECTED_BIT);
         break;
     case MQTT_EVENT_PUBLISHED:
@@ -461,8 +475,9 @@ static inline uint32_t millis(void)
 /* ============================================================
  * 12. ISRs
  * ============================================================ */
-static void IRAM_ATTR encoder_isr_handler(void *arg)
+static void IRAM_ATTR stitch_pulse_isr_handler(void *arg)
 {
+    /* Single-wire pulse (no quadrature). Falling edge = 1 stitch. */
     gpio_event_t evt = {
         .type  = EVT_STITCH,
         .value = 0,
@@ -572,6 +587,12 @@ static void emit_piece(uint32_t complete_ms, bool completed)
         (trim_start_ms > 0) ? (complete_ms - trim_start_ms) : 0);
     cJSON_AddStringToObject(doc, "status",                completed ? "COMPLETED" : "ABANDONED");
 
+    /* Publish to shared state for the UI/LED to pick up. */
+    state_note_piece_complete(piece_seq,
+                              complete_ms - piece_start_ms,
+                              total_stitching_ms,
+                              adjust_count);
+
     cJSON *seg_array = cJSON_CreateArray();
     int    seg_idx   = 1;
     for (size_t i = 0; i < seg_count; i++) {
@@ -626,17 +647,20 @@ static void handle_event(const gpio_event_t *e)
             seg_count          = 0;
             total_stitch_count = 0;
             open_segment(SEG_STITCH, t);
+            state_set_device(DEV_ST_SEWING);
             ESP_LOGI(TAG, "piece #%lu started", (unsigned long)(piece_seq + 1));
         } else if (state == ST_ADJUSTING) {
             close_current_segment(t);
             state = ST_SEWING;
             open_segment(SEG_STITCH, t);
+            state_set_device(DEV_ST_SEWING);
         }
         if (state == ST_SEWING && seg_count > 0) {
             segments[seg_count - 1].stitch_count++;
             segments[seg_count - 1].end_ms = t;
             total_stitch_count++;
             last_stitch_ms = t;
+            state_set_current_stitches(total_stitch_count);
         }
         break;
 
@@ -648,6 +672,7 @@ static void handle_event(const gpio_event_t *e)
             close_current_segment(t);
             trim_start_ms = t;
             state         = ST_FINALIZING;
+            state_set_device(DEV_ST_FINALIZING);
             ESP_LOGI(TAG, "trim detected → finalizing piece");
         }
         break;
@@ -656,6 +681,7 @@ static void handle_event(const gpio_event_t *e)
         if (e->value == 1 && state == ST_FINALIZING) {
             emit_piece(t, /*completed=*/true);
             state = ST_IDLE;
+            state_set_device(DEV_ST_IDLE);
         }
         break;
     }
@@ -671,6 +697,7 @@ static void check_timeouts(uint32_t now)
         close_current_segment(last_stitch_ms);
         open_segment(SEG_ADJUST, last_stitch_ms);
         state = ST_ADJUSTING;
+        state_set_device(DEV_ST_ADJUSTING);
     }
     if (state == ST_ADJUSTING && (now - last_activity_ms) > PIECE_ABANDON_MS) {
         close_current_segment(now);
@@ -678,6 +705,7 @@ static void check_timeouts(uint32_t now)
                  (unsigned long)(now - last_activity_ms));
         emit_piece(now, /*completed=*/false);
         state = ST_IDLE;
+        state_set_device(DEV_ST_IDLE);
     }
 }
 
@@ -687,19 +715,17 @@ static void check_timeouts(uint32_t now)
  * ============================================================ */
 static void gpio_setup(void)
 {
-    gpio_config_t enc_conf = {
+    /* Stitch pulse: single-line signal, one falling edge per stitch. */
+    gpio_config_t stitch_conf = {
         .intr_type    = GPIO_INTR_NEGEDGE,
-        .pin_bit_mask = (1ULL << PIN_ENC_A),
+        .pin_bit_mask = (1ULL << PIN_STITCH_PULSE),
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
     };
-    gpio_config(&enc_conf);
+    gpio_config(&stitch_conf);
 
-    gpio_reset_pin(PIN_ENC_B);
-    gpio_set_direction(PIN_ENC_B, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(PIN_ENC_B, GPIO_PULLUP_ONLY);
-
+    /* Foot / trim / wiper: ANYEDGE with per-button debounce in the ISR. */
     uint64_t button_mask = (1ULL << PIN_FOOT) | (1ULL << PIN_TRIM) | (1ULL << PIN_WIPER);
     gpio_config_t btn_conf = {
         .intr_type    = GPIO_INTR_ANYEDGE,
@@ -711,10 +737,10 @@ static void gpio_setup(void)
     gpio_config(&btn_conf);
 
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_ENC_A, encoder_isr_handler, NULL);
-    gpio_isr_handler_add(PIN_FOOT,  button_isr_handler,  &btn_foot);
-    gpio_isr_handler_add(PIN_TRIM,  button_isr_handler,  &btn_trim);
-    gpio_isr_handler_add(PIN_WIPER, button_isr_handler,  &btn_wiper);
+    gpio_isr_handler_add(PIN_STITCH_PULSE, stitch_pulse_isr_handler, NULL);
+    gpio_isr_handler_add(PIN_FOOT,         button_isr_handler,       &btn_foot);
+    gpio_isr_handler_add(PIN_TRIM,         button_isr_handler,       &btn_trim);
+    gpio_isr_handler_add(PIN_WIPER,        button_isr_handler,       &btn_wiper);
 }
 
 
@@ -723,6 +749,32 @@ static void gpio_setup(void)
  * ============================================================ */
 void app_main(void)
 {
+    /* Bring up shared state + status LED before anything else, so the whole
+     * boot sequence is visible on the NeoPixel from the first breath onward. */
+    state_init();
+    state_set_device(DEV_ST_BOOT);
+    indicator_init();
+    indicator_start_task();
+
+    /* Shared I2C bus is used by TSC2007 touch, TCA9534 expander, PN532 NFC.
+     * Init the bus once here; each driver attaches its own device handle. */
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port                     = I2C_NUM_0,
+        .sda_io_num                   = I2C_MASTER_SDA_GPIO,
+        .scl_io_num                   = I2C_MASTER_SCL_GPIO,
+        .clk_source                   = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt            = 0,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &i2c_bus));
+
+    /* Peripherals that don't need network up */
+    ESP_ERROR_CHECK(expander_init(i2c_bus));
+    ESP_ERROR_CHECK(nfc_init(i2c_bus));
+    nfc_start_task();
+    lcd_ui_start(i2c_bus);   /* spawns GUI task on core 1 */
+
     /* Format MAC-derived strings early — esp_read_mac works before wifi start. */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -734,9 +786,11 @@ void app_main(void)
     ESP_LOGI(TAG, "topic: %s", mqtt_topic);
 
     /* WiFi + wait for IP */
+    state_set_device(DEV_ST_WIFI_WAIT);
     wifi_init_sta();
     if (!wifi_wait_for_ip(portMAX_DELAY)) {
         ESP_LOGE(TAG, "WiFi failed — restarting");
+        state_set_device(DEV_ST_ERROR);
         vTaskDelay(pdMS_TO_TICKS(3000));
         esp_restart();
     }
@@ -747,27 +801,33 @@ void app_main(void)
 
     /* Activation branch */
     nvs_load_activation();
+    if (!activated_g) state_set_device(DEV_ST_NOT_ACTIVATED);
     while (!activated_g) {
         ESP_LOGI(TAG_ACT, "not activated; attempting activation...");
+        state_set_device(DEV_ST_ACTIVATING);
         if (try_activate()) {
             ESP_LOGI(TAG_ACT, "success — restarting in 2s");
             vTaskDelay(pdMS_TO_TICKS(2000));
             esp_restart();   /* next boot takes the "already activated" path */
         }
         ESP_LOGW(TAG_ACT, "activation failed; retrying in 10s");
+        state_set_device(DEV_ST_NOT_ACTIVATED);
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 
     /* Activated → bring up MQTT */
+    state_set_device(DEV_ST_MQTT_WAIT);
     mqtt_start();
 
     /* Set up GPIO + event queue */
     event_queue = xQueueCreate(EVENT_QUEUE_LEN, sizeof(gpio_event_t));
     if (event_queue == NULL) {
         ESP_LOGE(TAG, "event_queue alloc failed");
+        state_set_device(DEV_ST_ERROR);
         return;
     }
     gpio_setup();
+    state_set_device(DEV_ST_IDLE);
     ESP_LOGI(TAG, "segmentation ready. sew a piece.");
 
     /* Main event loop */
